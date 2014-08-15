@@ -1,7 +1,6 @@
 #! @perl@ -w @perlFlags@
 
 use strict;
-use File::Temp qw(tempdir);
 use Nix::Config;
 use Nix::Utils;
 
@@ -50,8 +49,7 @@ if ($interactive && !defined $ENV{"NIX_HAVE_TERMINAL"}) {
 }
 
 
-my $tmpDir = tempdir("nix-install-package.XXXXXX", CLEANUP => 1, TMPDIR => 1)
-    or die "cannot create a temporary directory";
+my $tmpDir = mkTempDir("nix-install-package");
 
 
 sub barf {
@@ -108,7 +106,7 @@ if ($interactive) {
 
 if (defined $binaryCacheURL) {
 
-    push @extraNixEnvArgs, "--option", "binary-caches", $binaryCacheURL;
+    push @extraNixEnvArgs, "--option", "extra-binary-caches", $binaryCacheURL;
 
 } else {
 

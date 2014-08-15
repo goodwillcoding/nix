@@ -73,9 +73,16 @@ fi
 
 # Subscribe the user to the Nixpkgs channel and fetch it.
 if ! $nix/bin/nix-channel --list | grep -q "^nixpkgs "; then
-    $nix/bin/nix-channel --add http://nixos.org/channels/nixpkgs-unstable
+    if [ -n "$SSL_CERT_FILE" ]; then
+        $nix/bin/nix-channel --add https://nixos.org/channels/nixpkgs-unstable
+    else
+        $nix/bin/nix-channel --add http://nixos.org/channels/nixpkgs-unstable
+    fi
 fi
 $nix/bin/nix-channel --update nixpkgs
+
+# Install an SSL certificate bundle.
+$nix/bin/nix-env -iA nixpkgs.cacert || true
 
 # Make the shell source nix.sh during login.
 p=$NIX_LINK/etc/profile.d/nix.sh

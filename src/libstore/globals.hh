@@ -21,7 +21,9 @@ struct Settings {
 
     void set(const string & name, const string & value);
 
-    string get(const string & name, const string & def = "");
+    string get(const string & name, const string & def);
+
+    Strings get(const string & name, const Strings & def);
 
     void update();
 
@@ -144,10 +146,6 @@ struct Settings {
     /* Whether to build in chroot. */
     bool useChroot;
 
-    /* The directories from the host filesystem to be included in the
-       chroot. */
-    StringSet dirsInChroot;
-
     /* Set of ssh connection strings for the ssh substituter */
     Strings sshSubstituterHosts;
 
@@ -205,23 +203,14 @@ struct Settings {
     /* Whether the importNative primop should be enabled */
     bool enableImportNative;
 
-    /* List of users that have elevated rights in the Nix daemon, such
-       as the ability to specify additional binary caches, or to
-       import unsigned NARs. */
-    Strings trustedUsers;
-
-    /* List of users that are allowed to connect to the daemon, in
-       addition to the trusted users. These have normal rights. */
-    Strings allowedUsers;
-
 private:
     SettingsMap settings, overrides;
 
-    void get(string & res, const string & name);
-    void get(bool & res, const string & name);
-    void get(StringSet & res, const string & name);
-    void get(Strings & res, const string & name);
-    template<class N> void get(N & res, const string & name);
+    void _get(string & res, const string & name);
+    void _get(bool & res, const string & name);
+    void _get(StringSet & res, const string & name);
+    void _get(Strings & res, const string & name);
+    template<class N> void _get(N & res, const string & name);
 };
 
 

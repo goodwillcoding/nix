@@ -374,8 +374,6 @@ void Goal::trace(const format & f)
 /* Common initialisation performed in child processes. */
 static void commonChildInit(Pipe & logPipe)
 {
-    restoreAffinity();
-
     /* Put the child in a separate session (and thus a separate
        process group) so that it has no controlling terminal (meaning
        that e.g. ssh cannot open /dev/tty) and it doesn't receive
@@ -410,18 +408,6 @@ const char * * strings2CharPtrs(const Strings & ss)
     foreach (Strings::const_iterator, i, ss) *p++ = i->c_str();
     *p = 0;
     return arr;
-}
-
-
-/* Restore default handling of SIGPIPE, otherwise some programs will
-   randomly say "Broken pipe". */
-static void restoreSIGPIPE()
-{
-    struct sigaction act, oact;
-    act.sa_handler = SIG_DFL;
-    act.sa_flags = 0;
-    sigemptyset(&act.sa_mask);
-    if (sigaction(SIGPIPE, &act, &oact)) throw SysError("resetting SIGPIPE");
 }
 
 
@@ -637,7 +623,7 @@ HookInstance::HookInstance()
 HookInstance::~HookInstance()
 {
     try {
-        pid.kill();
+        pid.kill(true);
     } catch (...) {
         ignoreException();
     }
@@ -772,11 +758,6 @@ private:
        for this build's outputs.  This needs to be shared between
        outputs to allow hard links between outputs. */
     InodesSeen inodesSeen;
-
-    /* Magic exit code denoting that setting up the child environment
-       failed.  (It's possible that the child actually returns the
-       exit code, but ah well.) */
-    const static int childSetupFailed = 189;
 
 public:
     DerivationGoal(const Path & drvPath, const StringSet & wantedOutputs, Worker & worker, BuildMode buildMode = bmNormal);
@@ -1422,9 +1403,6 @@ void DerivationGoal::buildDone()
                     if (pathExists(chrootRootDir + *i))
                         rename((chrootRootDir + *i).c_str(), i->c_str());
 
-            if (WIFEXITED(status) && WEXITSTATUS(status) == childSetupFailed)
-                throw Error(format("failed to set up the build environment for `%1%'") % drvPath);
-
             if (diskFull)
                 printMsg(lvlError, "note: build failure may have been caused by lack of free disk space");
 
@@ -1814,12 +1792,15 @@ void DerivationGoal::startBuilder()
 
         /* Bind-mount a user-configurable set of directories from the
            host file system. */
-        foreach (StringSet::iterator, i, settings.dirsInChroot) {
-            size_t p = i->find('=');
+        PathSet dirs = tokenizeString<StringSet>(settings.get("build-chroot-dirs", DEFAULT_CHROOT_DIRS));
+        PathSet dirs2 = tokenizeString<StringSet>(settings.get("build-extra-chroot-dirs", ""));
+        dirs.insert(dirs2.begin(), dirs2.end());
+        for (auto & i : dirs) {
+            size_t p = i.find('=');
             if (p == string::npos)
-                dirsInChroot[*i] = *i;
+                dirsInChroot[i] = i;
             else
-                dirsInChroot[string(*i, 0, p)] = string(*i, p + 1);
+                dirsInChroot[string(i, 0, p)] = string(i, p + 1);
         }
         dirsInChroot[tmpDir] = tmpDir;
 
@@ -1958,10 +1939,15 @@ void DerivationGoal::startBuilder()
     worker.childStarted(shared_from_this(), pid,
         singleton<set<int> >(builderOut.readSide), true, true);
 
+    /* Check if setting up the build environment failed. */
+    string msg = readLine(builderOut.readSide);
+    if (!msg.empty()) throw Error(msg);
+
     if (settings.printBuildTrace) {
         printMsg(lvlError, format("@ build-started %1% - %2% %3%")
             % drvPath % drv.platform % logFile);
     }
+
 }
 
 
@@ -1970,9 +1956,13 @@ void DerivationGoal::initChild()
     /* Warning: in the child we should absolutely not make any SQLite
        calls! */
 
-    bool inSetup = true;
-
     try { /* child */
+
+        _writeToStderr = 0;
+
+        restoreAffinity();
+
+        commonChildInit(builderOut);
 
 #if CHROOT_ENABLED
         if (useChroot) {
@@ -2092,8 +2082,6 @@ void DerivationGoal::initChild()
         }
 #endif
 
-        commonChildInit(builderOut);
-
         if (chdir(tmpDir.c_str()) == -1)
             throw SysError(format("changing into `%1%'") % tmpDir);
 
@@ -2162,15 +2150,17 @@ void DerivationGoal::initChild()
 
         restoreSIGPIPE();
 
+        /* Indicate that we managed to set up the build environment. */
+        writeToStderr("\n");
+
         /* Execute the program.  This should not return. */
-        inSetup = false;
         execve(program.c_str(), (char * *) &args[0], (char * *) envArr);
 
         throw SysError(format("executing `%1%'") % drv.builder);
 
     } catch (std::exception & e) {
-        writeToStderr("build error: " + string(e.what()) + "\n");
-        _exit(inSetup ? childSetupFailed : 1);
+        writeToStderr("while setting up the build environment: " + string(e.what()) + "\n");
+        _exit(1);
     }
 
     abort(); /* never reached */

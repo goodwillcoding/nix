@@ -645,8 +645,10 @@ bool matchUser(const string & user, const string & group, const Strings & users)
 #define SD_LISTEN_FDS_START 3
 
 
-static void daemonLoop()
+static void daemonLoop(char * * argv)
 {
+    chdir("/");
+
     /* Get rid of children automatically; don't let them become
        zombies. */
     setSigChldAction(true);
@@ -743,10 +745,13 @@ static void daemonLoop()
             struct group * gr = getgrgid(cred.gid);
             string group = gr ? gr->gr_name : int2String(cred.gid);
 
-            if (matchUser(user, group, settings.trustedUsers))
+            Strings trustedUsers = settings.get("trusted-users", Strings({"root"}));
+            Strings allowedUsers = settings.get("allowed-users", Strings({"*"}));
+
+            if (matchUser(user, group, trustedUsers))
                 trusted = true;
 
-            if (!trusted && !matchUser(user, group, settings.allowedUsers))
+            if (!trusted && !matchUser(user, group, allowedUsers))
                 throw Error(format("user `%1%' is not allowed to connect to the Nix daemon") % user);
 
             printMsg(lvlInfo, format((string) "accepted connection from pid %1%, user %2%"
@@ -763,9 +768,9 @@ static void daemonLoop()
                 setSigChldAction(false);
 
                 /* For debugging, stuff the pid into argv[1]. */
-                if (clientPid != -1 && argvSaved[1]) {
+                if (clientPid != -1 && argv[1]) {
                     string processName = int2String(clientPid);
-                    strncpy(argvSaved[1], processName.c_str(), strlen(argvSaved[1]));
+                    strncpy(argv[1], processName.c_str(), strlen(argv[1]));
                 }
 
                 /* Handle the connection. */
@@ -789,18 +794,27 @@ void run(Strings args)
 {
     for (Strings::iterator i = args.begin(); i != args.end(); ) {
         string arg = *i++;
-        if (arg == "--daemon") /* ignored for backwards compatibility */;
     }
 
-    chdir("/");
-    daemonLoop();
 }
 
 
-void printHelp()
+int main(int argc, char * * argv)
 {
-    showManPage("nix-daemon");
+    return handleExceptions(argv[0], [&]() {
+        initNix();
+
+        parseCmdLine(argc, argv, [&](Strings::iterator & arg, const Strings::iterator & end) {
+            if (*arg == "--daemon")
+                ; /* ignored for backwards compatibility */
+            else if (*arg == "--help")
+                showManPage("nix-daemon");
+            else if (*arg == "--version")
+                printVersion("nix-daemon");
+            else return false;
+            return true;
+        });
+
+        daemonLoop(argv);
+    });
 }
-
-
-string programId = "nix-daemon";

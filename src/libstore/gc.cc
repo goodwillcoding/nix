@@ -115,7 +115,10 @@ Path addPermRoot(StoreAPI & store, const Path & _storePath,
                     % gcRoot % rootsDir);
         }
 
-        makeSymlink(gcRoot, storePath);
+        if (baseNameOf(gcRoot) == baseNameOf(storePath))
+            writeFile(gcRoot, "");
+        else
+            makeSymlink(gcRoot, storePath);
     }
 
     /* Check that the root can be found by the garbage collector.
@@ -230,11 +233,11 @@ static void readTempRoots(PathSet & tempRoots, FDs & fds)
 {
     /* Read the `temproots' directory for per-process temporary root
        files. */
-    Strings tempRootFiles = readDirectory(
+    DirEntries tempRootFiles = readDirectory(
         (format("%1%/%2%") % settings.nixStateDir % tempRootsDir).str());
 
-    foreach (Strings::iterator, i, tempRootFiles) {
-        Path path = (format("%1%/%2%/%3%") % settings.nixStateDir % tempRootsDir % *i).str();
+    for (auto & i : tempRootFiles) {
+        Path path = (format("%1%/%2%/%3%") % settings.nixStateDir % tempRootsDir % i.name).str();
 
         debug(format("reading temporary root file `%1%'") % path);
         FDPtr fd(new AutoCloseFD(open(path.c_str(), O_RDWR, 0666)));
@@ -294,19 +297,23 @@ static void foundRoot(StoreAPI & store,
 }
 
 
-static void findRoots(StoreAPI & store, const Path & path, Roots & roots)
+static void findRoots(StoreAPI & store, const Path & path, unsigned char type, Roots & roots)
 {
     try {
 
-        struct stat st = lstat(path);
-
-        if (S_ISDIR(st.st_mode)) {
-            Strings names = readDirectory(path);
-            foreach (Strings::iterator, i, names)
-                findRoots(store, path + "/" + *i, roots);
+        if (type == DT_UNKNOWN) {
+            struct stat st = lstat(path);
+            if (S_ISDIR(st.st_mode)) type = DT_DIR;
+            else if (S_ISLNK(st.st_mode)) type = DT_LNK;
+            else if (S_ISREG(st.st_mode)) type = DT_REG;
         }
 
-        else if (S_ISLNK(st.st_mode)) {
+        if (type == DT_DIR) {
+            for (auto & i : readDirectory(path))
+                findRoots(store, path + "/" + i.name, i.type, roots);
+        }
+
+        else if (type == DT_LNK) {
             Path target = readLink(path);
             if (isInStore(target))
                 foundRoot(store, path, target, roots);
@@ -328,6 +335,12 @@ static void findRoots(StoreAPI & store, const Path & path, Roots & roots)
             }
         }
 
+        else if (type == DT_REG) {
+            Path storePath = settings.nixStore + "/" + baseNameOf(path);
+            if (store.isValidPath(storePath))
+                roots[path] = storePath;
+        }
+
     }
 
     catch (SysError & e) {
@@ -345,9 +358,9 @@ Roots LocalStore::findRoots()
     Roots roots;
 
     /* Process direct roots in {gcroots,manifests,profiles}. */
-    nix::findRoots(*this, settings.nixStateDir + "/" + gcRootsDir, roots);
-    nix::findRoots(*this, settings.nixStateDir + "/manifests", roots);
-    nix::findRoots(*this, settings.nixStateDir + "/profiles", roots);
+    nix::findRoots(*this, settings.nixStateDir + "/" + gcRootsDir, DT_UNKNOWN, roots);
+    nix::findRoots(*this, settings.nixStateDir + "/manifests", DT_UNKNOWN, roots);
+    nix::findRoots(*this, settings.nixStateDir + "/profiles", DT_UNKNOWN, roots);
 
     return roots;
 }
@@ -449,7 +462,6 @@ void LocalStore::deletePathRecursive(GCState & state, const Path & path)
         // if the path was not valid, need to determine the actual
         // size.
         state.bytesInvalidated += size;
-        // Mac OS X cannot rename directories if they are read-only.
         if (chmod(path.c_str(), st.st_mode | S_IWUSR) == -1)
             throw SysError(format("making `%1%' writable") % path);
         Path tmp = state.trashDir + "/" + baseNameOf(path);
@@ -649,7 +661,7 @@ void LocalStore::collectGarbage(const GCOptions & options, GCResults & results)
 
     /* After this point the set of roots or temporary roots cannot
        increase, since we hold locks on everything.  So everything
-       that is not reachable from `roots'. */
+       that is not reachable from `roots' is garbage. */
 
     if (state.shouldDelete) {
         if (pathExists(state.trashDir)) deleteGarbage(state, state.trashDir);

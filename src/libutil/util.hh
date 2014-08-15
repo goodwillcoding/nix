@@ -64,7 +64,18 @@ bool isLink(const Path & path);
 
 /* Read the contents of a directory.  The entries `.' and `..' are
    removed. */
-Strings readDirectory(const Path & path);
+struct DirEntry
+{
+    string name;
+    ino_t ino;
+    unsigned char type; // one of DT_*
+    DirEntry(const string & name, ino_t ino, unsigned char type)
+        : name(name), ino(ino), type(type) { }
+};
+
+typedef vector<DirEntry> DirEntries;
+
+DirEntries readDirectory(const Path & path);
 
 /* Read the contents of a file into a string. */
 string readFile(int fd);
@@ -242,7 +253,7 @@ public:
     ~Pid();
     void operator =(pid_t pid);
     operator pid_t();
-    void kill();
+    void kill(bool quiet = false);
     int wait(bool block);
     void setSeparatePG(bool separatePG);
     void setKillSignal(int signal);
@@ -272,6 +283,10 @@ void closeMostFDs(const set<int> & exceptions);
 
 /* Set the close-on-exec flag for the given file descriptor. */
 void closeOnExec(int fd);
+
+/* Restore default handling of SIGPIPE, otherwise some programs will
+   randomly say "Broken pipe". */
+void restoreSIGPIPE();
 
 
 /* User interruption. */

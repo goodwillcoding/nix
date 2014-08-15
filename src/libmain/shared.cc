@@ -100,10 +100,16 @@ string getArg(const string & opt,
 void detectStackOverflow();
 
 
-/* Initialize and reorder arguments, then call the actual argument
-   processor. */
-static void initAndRun(int argc, char * * argv)
+void initNix()
 {
+    /* Turn on buffering for cerr. */
+#if HAVE_PUBSETBUF
+    static char buf[1024];
+    std::cerr.rdbuf()->pubsetbuf(buf, sizeof(buf));
+#endif
+
+    std::ios::sync_with_stdio(false);
+
     settings.processEnvironment();
     settings.loadConfFile();
 
@@ -144,35 +150,37 @@ static void initAndRun(int argc, char * * argv)
     gettimeofday(&tv, 0);
     srandom(tv.tv_usec);
 
-    /* Process the NIX_LOG_TYPE environment variable. */
-    string lt = getEnv("NIX_LOG_TYPE");
-    if (lt != "") setLogType(lt);
+    if (char *pack = getenv("_NIX_OPTIONS"))
+        settings.unpack(pack);
+}
 
+
+void parseCmdLine(int argc, char * * argv,
+    std::function<bool(Strings::iterator & arg, const Strings::iterator & end)> parseArg)
+{
     /* Put the arguments in a vector. */
-    Strings args, remaining;
+    Strings args;
+    argc--; argv++;
     while (argc--) args.push_back(*argv++);
-    args.erase(args.begin());
-
-    /* Expand compound dash options (i.e., `-qlf' -> `-q -l -f'), and
-       ignore options for the ATerm library. */
-    for (Strings::iterator i = args.begin(); i != args.end(); ++i) {
-        string arg = *i;
-        if (arg.length() > 2 && arg[0] == '-' && arg[1] != '-' && !isdigit(arg[1])) {
-            for (unsigned int j = 1; j < arg.length(); j++)
-                if (isalpha(arg[j]))
-                    remaining.push_back((string) "-" + arg[j]);
-                else     {
-                    remaining.push_back(string(arg, j));
-                    break;
-                }
-        } else remaining.push_back(arg);
-    }
-    args = remaining;
-    remaining.clear();
 
     /* Process default options. */
     for (Strings::iterator i = args.begin(); i != args.end(); ++i) {
         string arg = *i;
+
+        /* Expand compound dash options (i.e., `-qlf' -> `-q -l -f'). */
+        if (arg.length() > 2 && arg[0] == '-' && arg[1] != '-' && isalpha(arg[1])) {
+            *i = (string) "-" + arg[1];
+            auto next = i; ++next;
+            for (unsigned int j = 2; j < arg.length(); j++)
+                if (isalpha(arg[j]))
+                    args.insert(next, (string) "-" + arg[j]);
+                else {
+                    args.insert(next, string(arg, j));
+                    break;
+                }
+            arg = *i;
+        }
+
         if (arg == "--verbose" || arg == "-v") verbosity = (Verbosity) (verbosity + 1);
         else if (arg == "--quiet") verbosity = verbosity > lvlError ? (Verbosity) (verbosity - 1) : lvlError;
         else if (arg == "--log-type") {
@@ -183,14 +191,6 @@ static void initAndRun(int argc, char * * argv)
             settings.buildVerbosity = lvlVomit;
         else if (arg == "--print-build-trace")
             settings.printBuildTrace = true;
-        else if (arg == "--help") {
-            printHelp();
-            return;
-        }
-        else if (arg == "--version") {
-            std::cout << format("%1% (Nix) %2%") % programId % nixVersion << std::endl;
-            return;
-        }
         else if (arg == "--keep-failed" || arg == "-K")
             settings.keepFailed = true;
         else if (arg == "--keep-going" || arg == "-k")
@@ -220,60 +220,36 @@ static void initAndRun(int argc, char * * argv)
             string value = *i;
             settings.set(name, value);
         }
-        else if (arg == "--arg" || arg == "--argstr") {
-            remaining.push_back(arg);
-            ++i; if (i == args.end()) throw UsageError(format("`%1%' requires two arguments") % arg);
-            remaining.push_back(*i);
-            ++i; if (i == args.end()) throw UsageError(format("`%1%' requires two arguments") % arg);
-            remaining.push_back(*i);
+        else {
+            if (!parseArg(i, args.end()))
+                throw UsageError(format("unrecognised option `%1%'") % *i);
         }
-        else remaining.push_back(arg);
     }
 
-    if (char *pack = getenv("_NIX_OPTIONS"))
-        settings.unpack(pack);
-
     settings.update();
+}
 
-    run(remaining);
 
-    /* Close the Nix database. */
-    store.reset((StoreAPI *) 0);
+void printVersion(const string & programName)
+{
+    std::cout << format("%1% (Nix) %2%") % programName % nixVersion << std::endl;
+    throw Exit();
 }
 
 
 void showManPage(const string & name)
 {
-    string cmd = "man " + name;
-    if (system(cmd.c_str()) != 0)
-        throw Error(format("command `%1%' failed") % cmd);
+    restoreSIGPIPE();
+    execlp("man", "man", name.c_str(), NULL);
+    throw SysError(format("command `man %1%' failed") % name.c_str());
 }
 
 
-int exitCode = 0;
-char * * argvSaved = 0;
-
-}
-
-
-static char buf[1024];
-
-int main(int argc, char * * argv)
+int handleExceptions(const string & programName, std::function<void()> fun)
 {
-    using namespace nix;
-
-    argvSaved = argv;
-
-    /* Turn on buffering for cerr. */
-#if HAVE_PUBSETBUF
-    std::cerr.rdbuf()->pubsetbuf(buf, sizeof(buf));
-#endif
-
-    std::ios::sync_with_stdio(false);
-
     try {
         try {
-            initAndRun(argc, argv);
+            fun();
         } catch (...) {
             /* Subtle: we have to make sure that any `interrupted'
                condition is discharged before we reach printMsg()
@@ -283,12 +259,14 @@ int main(int argc, char * * argv)
             _isInterrupted = 0;
             throw;
         }
+    } catch (Exit & e) {
+        return e.status;
     } catch (UsageError & e) {
         printMsg(lvlError,
             format(
                 "error: %1%\n"
                 "Try `%2% --help' for more information.")
-            % e.what() % programId);
+            % e.what() % programName);
         return 1;
     } catch (BaseError & e) {
         printMsg(lvlError, format("error: %1%%2%") % (settings.showTrace ? e.prefix() : "") % e.msg());
@@ -303,5 +281,8 @@ int main(int argc, char * * argv)
         return 1;
     }
 
-    return exitCode;
+    return 0;
+}
+
+
 }

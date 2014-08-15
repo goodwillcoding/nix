@@ -19,7 +19,7 @@ let
         name = "nix-tarball";
         version = builtins.readFile ./version;
         versionSuffix = if officialRelease then "" else "pre${toString nix.revCount}_${nix.shortRev}";
-        src = nix;
+        src = if lib.inNixShell then null else nix;
         inherit officialRelease;
 
         buildInputs =
@@ -92,6 +92,14 @@ let
           --enable-gc
           --sysconfdir=/etc
         '';
+
+        # Provide a default value for the ‘build-chroot-dirs’ setting
+        # that includes /bin/sh pointing to bash.
+        preHook = lib.optionalString stdenv.isLinux (
+          let sh = stdenv.shell; in
+          ''
+            export DEFAULT_CHROOT_DIRS="/bin/sh=${sh} $(tr '\n' ' ' < ${writeReferencesToFile sh})"
+          '');
 
         enableParallelBuilding = true;
 
